@@ -1,31 +1,38 @@
 #!/bin/bash
 set -e
-
 echo "Instalando Go 1.22..."
 wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
 sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz
 rm go1.22.0.linux-amd64.tar.gz
-
-# Adicionar Go ao PATH se ainda não estiver
+# Adicionar Go ao PATH para a sessão atual e permanentemente
+export PATH=$PATH:/usr/local/go/bin
+# Adicionar ao .profile para sessões futuras
 if ! grep -q "/usr/local/go/bin" ~/.profile; then
     echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile
-    source ~/.profile
 fi
-
-echo "Go $(go version) instalado com sucesso!"
-
+# Verificar a instalação do Go
+if command -v go &> /dev/null; then
+    echo "Go $(go version) instalado com sucesso!"
+else
+    echo "Go instalado em /usr/local/go/bin, mas não está no PATH."
+    echo "Usando caminho completo para comandos Go."
+    GO_BIN="/usr/local/go/bin/go"
+fi
+# Definir o comando Go (usando variável que funciona com ou sem Go no PATH)
+GO_CMD="go"
+if ! command -v go &> /dev/null; then
+    GO_CMD="/usr/local/go/bin/go"
+fi
 # Verificar e instalar dependências Python
 echo "Verificando dependências Python..."
 if ! python3 -c "import face_recognition" &> /dev/null; then
     echo "Instalando face_recognition..."
     pip3 install face_recognition
 fi
-
 if ! python3 -c "import numpy" &> /dev/null; then
     echo "Instalando numpy..."
     pip3 install numpy
 fi
-
 # Verificar se o script Python existe
 if [ ! -f "scripts/face_encoder.py" ]; then
     echo "Criando script face_encoder.py..."
@@ -70,11 +77,9 @@ if __name__ == "__main__":
     print(result)
 EOF
 fi
-
 echo "Compilando o processador de faces..."
 mkdir -p bin
-go build -o bin/face-processor ./cmd/processor
-
+$GO_CMD build -o bin/face-processor ./cmd/processor
 echo "Instalação concluída!"
 echo "Para executar: ./bin/face-processor /fotosconhecidas /fotoscodificadas"
 echo ""

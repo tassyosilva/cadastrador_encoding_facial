@@ -317,7 +317,6 @@ func worker(id int, knownDir string, jobs <-chan string, results chan<- struct {
 	processedCount := 0
 	
 	for fileName := range jobs {
-		itemStartTime := time.Now()
 		imagePath := filepath.Join(knownDir, fileName)
 		encoding, err := extractFaceEncoding(imagePath)
 		

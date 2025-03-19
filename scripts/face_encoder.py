@@ -14,17 +14,16 @@ def encode_face(image_path):
         
         if not encodings:
             return json.dumps({"success": False, "error": "No face found"})
-        
+            
         # Converter o primeiro encoding para uma lista e depois para JSON
         # Precisamos converter para base64 porque numpy arrays não são serializáveis diretamente
         encoding_base64 = base64.b64encode(encodings[0].tobytes()).decode('utf-8')
         
         return json.dumps({
-            "success": True, 
+            "success": True,
             "encoding": encoding_base64,
             "shape": encodings[0].shape
         })
-    
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
 
@@ -32,7 +31,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(json.dumps({"success": False, "error": "Usage: python face_encoder.py <image_path>"}))
         sys.exit(1)
-    
+        
     image_path = sys.argv[1]
     result = encode_face(image_path)
     print(result)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,12 +15,6 @@ import (
 	"unsafe"
 )
 
-// FaceEncoding representa o encoding de um rosto
-type FaceEncoding struct {
-	Data  []float32
-	Shape []int
-}
-
 // EncodingResult é a resposta do script Python
 type EncodingResult struct {
 	Success  bool   `json:"success"`
@@ -30,63 +23,91 @@ type EncodingResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// KnownFaces armazena os encodings e nomes
-type KnownFaces struct {
-	Encodings [][]float32
-	Names     []string
-}
-
 func main() {
 	knownDir := "/fotosconhecidas"
-	outputFile := "../known_faces.gob"
+	outputDir := "/fotoscodificadas"
 	
 	// Verificar argumentos da linha de comando
 	if len(os.Args) > 1 {
 		knownDir = os.Args[1]
 	}
 	if len(os.Args) > 2 {
-		outputFile = os.Args[2]
+		outputDir = os.Args[2]
 	}
 
-	fmt.Printf("Processando imagens de %s e salvando em %s\n", knownDir, outputFile)
+	fmt.Printf("Processando imagens de %s e salvando em %s\n", knownDir, outputDir)
 	
 	// Processar as faces conhecidas
-	err := preprocessKnownFaces(knownDir, outputFile)
+	err := preprocessKnownFaces(knownDir, outputDir)
 	if err != nil {
 		fmt.Printf("Erro: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func preprocessKnownFaces(knownDir, outputFile string) error {
+func preprocessKnownFaces(knownDir, outputDir string) error {
 	// Verificar se o diretório existe
 	if _, err := os.Stat(knownDir); os.IsNotExist(err) {
 		return fmt.Errorf("o diretório %s não existe", knownDir)
 	}
 
-	// Carregar dados existentes, se houver
-	var knownFaces KnownFaces
-	knownNamesMap := make(map[string]bool)
-
-	if _, err := os.Stat(outputFile); err == nil {
-		// O arquivo existe, carregar dados
-		file, err := os.Open(outputFile)
-		if err != nil {
-			return fmt.Errorf("erro ao abrir arquivo %s: %v", outputFile, err)
-		}
-		defer file.Close()
-
-		decoder := gob.NewDecoder(file)
-		if err := decoder.Decode(&knownFaces); err != nil {
-			return fmt.Errorf("erro ao decodificar arquivo %s: %v", outputFile, err)
-		}
-		
-		fmt.Printf("Carregados %d encodings existentes\n", len(knownFaces.Names))
+	// Criar diretório de saída se não existir
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("erro ao criar diretório %s: %v", outputDir, err)
 	}
 
-	// Adicionar nomes existentes ao mapa para verificação rápida
-	for _, name := range knownFaces.Names {
-		knownNamesMap[name] = true
+	// Carregar dados existentes, se houver
+	var knownEncodings [][]float32
+	var knownNames []string
+	knownNamesMap := make(map[string]bool)
+
+	encodingsFile := filepath.Join(outputDir, "encodings.npy")
+	namesFile := filepath.Join(outputDir, "names.npy")
+
+	if _, err1 := os.Stat(encodingsFile); err1 == nil {
+		if _, err2 := os.Stat(namesFile); err2 == nil {
+			// Os arquivos existem, carregar dados usando Python
+			fmt.Println("Carregando encodings existentes...")
+			
+			cmd := exec.Command("python3", "-c", `
+import numpy as np
+import sys
+import json
+
+try:
+    encodings = np.load("` + encodingsFile + `", allow_pickle=True)
+    names = np.load("` + namesFile + `", allow_pickle=True)
+    print(json.dumps({"success": True, "count": len(names), "names": names.tolist()}))
+except Exception as e:
+    print(json.dumps({"success": False, "error": str(e)}))
+`)
+			
+			output, err := cmd.Output()
+			if err != nil {
+				fmt.Printf("Aviso: erro ao carregar encodings existentes: %v\n", err)
+			} else {
+				var result struct {
+					Success bool     `json:"success"`
+					Count   int      `json:"count"`
+					Names   []string `json:"names"`
+					Error   string   `json:"error"`
+				}
+				
+				if err := json.Unmarshal(output, &result); err != nil {
+					fmt.Printf("Aviso: erro ao processar resposta: %v\n", err)
+				} else if result.Success {
+					knownNames = result.Names
+					fmt.Printf("Carregados %d encodings existentes\n", result.Count)
+					
+					// Preencher o mapa de nomes
+					for _, name := range knownNames {
+						knownNamesMap[name] = true
+					}
+				} else {
+					fmt.Printf("Aviso: erro ao carregar encodings: %s\n", result.Error)
+				}
+			}
+		}
 	}
 
 	// Listar arquivos no diretório
@@ -137,6 +158,10 @@ func preprocessKnownFaces(knownDir, outputFile string) error {
 	processed := 0
 	newEncodings := 0
 
+	// Coletar novos encodings
+	var newEncodingsList [][]float32
+	var newNamesList []string
+
 	for i := 0; i < validFiles; i++ {
 		result := <-results
 		processed++
@@ -146,8 +171,8 @@ func preprocessKnownFaces(knownDir, outputFile string) error {
 			continue
 		}
 		
-		knownFaces.Encodings = append(knownFaces.Encodings, result.encoding)
-		knownFaces.Names = append(knownFaces.Names, result.name)
+		newEncodingsList = append(newEncodingsList, result.encoding)
+		newNamesList = append(newNamesList, result.name)
 		newEncodings++
 		
 		// Mostrar progresso
@@ -163,26 +188,64 @@ func preprocessKnownFaces(knownDir, outputFile string) error {
 
 	// Salvar resultados se houver novos encodings
 	if newEncodings > 0 {
-		fmt.Printf("Salvando %d encodings (%d novos) em %s...\n", len(knownFaces.Names), newEncodings, outputFile)
+		fmt.Printf("Salvando %d encodings novos...\n", newEncodings)
 		
-		// Criar diretório de saída se não existir
-		outputDir := filepath.Dir(outputFile)
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return fmt.Errorf("erro ao criar diretório %s: %v", outputDir, err)
-		}
+		// Combinar encodings existentes com novos
+		allEncodings := append(knownEncodings, newEncodingsList...)
+		allNames := append(knownNames, newNamesList...)
 		
-		file, err := os.Create(outputFile)
+		// Salvar usando Python para manter compatibilidade
+		tempEncodingsFile := filepath.Join(outputDir, "temp_encodings.json")
+		tempNamesFile := filepath.Join(outputDir, "temp_names.json")
+		
+		// Salvar encodings em JSON temporário
+		encodingsJSON, err := json.Marshal(allEncodings)
 		if err != nil {
-			return fmt.Errorf("erro ao criar arquivo %s: %v", outputFile, err)
-		}
-		defer file.Close()
-		
-		encoder := gob.NewEncoder(file)
-		if err := encoder.Encode(knownFaces); err != nil {
-			return fmt.Errorf("erro ao codificar dados: %v", err)
+			return fmt.Errorf("erro ao serializar encodings: %v", err)
 		}
 		
-		fmt.Println("Encodings salvos com sucesso!")
+		if err := os.WriteFile(tempEncodingsFile, encodingsJSON, 0644); err != nil {
+			return fmt.Errorf("erro ao salvar encodings temporários: %v", err)
+		}
+		
+		// Salvar nomes em JSON temporário
+		namesJSON, err := json.Marshal(allNames)
+		if err != nil {
+			return fmt.Errorf("erro ao serializar nomes: %v", err)
+		}
+		
+		if err := os.WriteFile(tempNamesFile, namesJSON, 0644); err != nil {
+			return fmt.Errorf("erro ao salvar nomes temporários: %v", err)
+		}
+		
+		// Converter JSON para NPY usando Python
+		cmd := exec.Command("python3", "-c", `
+import numpy as np
+import json
+
+# Carregar encodings do JSON
+with open("` + tempEncodingsFile + `", "r") as f:
+    encodings = json.load(f)
+
+# Carregar nomes do JSON
+with open("` + tempNamesFile + `", "r") as f:
+    names = json.load(f)
+
+# Salvar como NPY
+np.save("` + encodingsFile + `", np.array(encodings))
+np.save("` + namesFile + `", np.array(names))
+
+# Remover arquivos temporários
+import os
+os.remove("` + tempEncodingsFile + `")
+os.remove("` + tempNamesFile + `")
+`)
+		
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("erro ao converter para NPY: %v", err)
+		}
+		
+		fmt.Printf("Encodings salvos com sucesso em %s e %s\n", encodingsFile, namesFile)
 	} else {
 		fmt.Println("Nenhum novo encoding para salvar.")
 	}

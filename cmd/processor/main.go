@@ -116,11 +116,53 @@ except Exception as e:
 		return fmt.Errorf("erro ao ler diretório %s: %v", knownDir, err)
 	}
 
+	// Verificar nomes de arquivos problemáticos
+	fmt.Println("Verificando nomes de arquivos...")
+	problematicFiles := 0
+	for _, file := range files {
+		fileName := file.Name()
+		if strings.Contains(fileName, " ") || strings.Contains(fileName, "'") || 
+		   strings.Contains(fileName, "&") || strings.Contains(fileName, "#") {
+			fmt.Printf("Aviso: O arquivo '%s' contém espaços ou caracteres especiais\n", fileName)
+			problematicFiles++
+		}
+	}
+	if problematicFiles > 0 {
+		fmt.Printf("Encontrados %d arquivos com nomes problemáticos que podem causar erros\n", problematicFiles)
+	}
+
+	// Contar arquivos por extensão
+	jpgCount := 0
+	jpegCount := 0
+	pngCount := 0
+	otherCount := 0
+
+	for _, file := range files {
+		fileName := file.Name()
+		ext := strings.ToLower(filepath.Ext(fileName))
+		
+		switch ext {
+		case ".jpg":
+			jpgCount++
+		case ".jpeg":
+			jpegCount++
+		case ".png":
+			pngCount++
+		default:
+			otherCount++
+			fmt.Printf("Extensão não suportada: %s (%s)\n", ext, fileName)
+		}
+	}
+
+	fmt.Printf("Contagem de arquivos por extensão: .jpg: %d, .jpeg: %d, .png: %d, outros: %d\n",
+			jpgCount, jpegCount, pngCount, otherCount)
+
 	fmt.Printf("Encontradas %d imagens para processar\n", len(files))
 
 	// Configurar processamento paralelo
-	numWorkers := runtime.NumCPU()
-	fmt.Printf("Utilizando %d workers (CPUs)\n", numWorkers)
+	cpuCount := runtime.NumCPU()
+	numWorkers := cpuCount * 2  // Multiplicador ajustável para melhor desempenho
+	fmt.Printf("Utilizando %d workers (com %d CPUs disponíveis)\n", numWorkers, cpuCount)
 	
 	jobs := make(chan string, len(files))
 	results := make(chan struct {
@@ -270,7 +312,12 @@ func worker(id int, knownDir string, jobs <-chan string, results chan<- struct {
 }, wg *sync.WaitGroup) {
 	defer wg.Done()
 	
+	// Adicionar monitoramento de desempenho do worker
+	workerStartTime := time.Now()
+	processedCount := 0
+	
 	for fileName := range jobs {
+		itemStartTime := time.Now()
 		imagePath := filepath.Join(knownDir, fileName)
 		encoding, err := extractFaceEncoding(imagePath)
 		
@@ -283,15 +330,41 @@ func worker(id int, knownDir string, jobs <-chan string, results chan<- struct {
 			encoding: encoding,
 			err:      err,
 		}
+		
+		// Monitorar desempenho individual
+		processedCount++
+		if processedCount % 10 == 0 {
+			elapsed := time.Since(workerStartTime)
+			avgTimePerItem := elapsed.Seconds() / float64(processedCount)
+			fmt.Printf("\nWorker %d: %d imagens em %.2fs (%.2f img/s)", 
+					  id, processedCount, elapsed.Seconds(), 1/avgTimePerItem)
+		}
 	}
 }
 
 func extractFaceEncoding(imagePath string) ([]float32, error) {
+	// Não é necessário escapar o caminho, a biblioteca exec já lida com espaços e caracteres especiais
+	scriptPath := filepath.Join("scripts", "face_encoder.py")
+
+	// Verificar se o script existe
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("script Python não encontrado: %s", scriptPath)
+	}
+
 	// Chamar o script Python para extrair o encoding
-	cmd := exec.Command("python3", "scripts/face_encoder.py", imagePath)
+	cmd := exec.Command("python3", scriptPath, imagePath)
+	
+	// Configurar ambiente para melhor compatibilidade
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
+	
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("erro ao criar pipe: %v", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("erro ao criar pipe de erro: %v", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -304,14 +377,21 @@ func extractFaceEncoding(imagePath string) ([]float32, error) {
 		return nil, fmt.Errorf("erro ao ler saída: %v", err)
 	}
 
+	// Ler erros, se houver
+	errorOutput, _ := io.ReadAll(stderr)
+	
 	if err := cmd.Wait(); err != nil {
+		errorMsg := string(errorOutput)
+		if errorMsg != "" {
+			return nil, fmt.Errorf("erro ao executar script Python: %v - %s", err, errorMsg)
+		}
 		return nil, fmt.Errorf("erro ao executar script Python: %v", err)
 	}
 
 	// Processar o resultado JSON
 	var result EncodingResult
 	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("erro ao processar JSON: %v", err)
+		return nil, fmt.Errorf("erro ao processar JSON: %v - output: %s", err, string(output[:100]))
 	}
 
 	if !result.Success {
